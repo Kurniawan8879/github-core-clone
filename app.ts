@@ -353,12 +353,13 @@ function handleRepo(ctx: Ctx, store: Store, s: string[]): void {
   // GET/PATCH/DELETE /repos/{owner}/{repo}
   if (rest.length === 0) {
     if (method === 'GET') {
+      const body = repoJson(repo);
       ctx.res.writeHead(200, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(repoJson(repo))),
+        'content-length': String(Buffer.byteLength(body)),
       });
-      ctx.res.end(repoJson(repo));
+      ctx.res.end(body);
       return;
     }
     if (method === 'PATCH') {
@@ -717,12 +718,13 @@ function handleIssues(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void 
         jsonCache: null,
       };
       repo.issues.set(issue.number, issue);
+      const body = issueJson(repo, issue);
       ctx.res.writeHead(201, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(issueJson(repo, issue))),
+        'content-length': String(Buffer.byteLength(body)),
       });
-      ctx.res.end(issueJson(repo, issue));
+      ctx.res.end(body);
       return;
     }
     if (method === 'GET') {
@@ -749,12 +751,13 @@ function handleIssues(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void 
   // GET / PATCH /issues/{n}
   if (rest.length === 1) {
     if (method === 'GET') {
+      const body = issueJson(repo, issue);
       ctx.res.writeHead(200, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(issueJson(repo, issue))),
+        'content-length': String(Buffer.byteLength(body)),
       });
-      ctx.res.end(issueJson(repo, issue));
+      ctx.res.end(body);
       return;
     }
     if (method === 'PATCH') {
@@ -972,35 +975,32 @@ function handlePulls(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void {
 
 // ---------------------------------------------------------------- server
 
-function pathSegments(raw: string): string[] {
-  let path = raw;
-  try {
-    path = new URL(raw, 'http://entry').pathname;
-  } catch {
-    path = '/';
-  }
-  if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
-  return path;
-}
+/** One shared empty body: most GETs carry no body at all. */
+const EMPTY_BODY = Buffer.alloc(0);
 
 /** Build the server. It binds nothing until the caller listens. */
 export function createApp(): Server {
   const store = new Store();
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     requestSeq += 1;
     const seq = requestSeq;
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
-      const body = Buffer.concat(chunks);
-      const path = pathSegments(req.url ?? '/');
+      // Small bodies arrive as a single chunk (or none): skip the Buffer.concat copy.
+      const body = chunks.length === 0 ? EMPTY_BODY : chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks);
       const method = req.method ?? 'GET';
+      // One URL parse gives both the path and the query (was two parses per request).
+      let path = '/';
       let query = new URLSearchParams();
       try {
-        query = new URL(req.url ?? '/', 'http://entry').searchParams;
+        const url = new URL(req.url ?? '/', 'http://entry');
+        path = url.pathname;
+        query = url.searchParams;
       } catch {
-        // Keep an empty query.
+        // Keep the defaults: an unparsable URL is the root with no query.
       }
+      if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
       let json: Record<string, unknown> | null = null;
       let bodyParsed: unknown = null;
       let jsonBad = false;
@@ -1126,4 +1126,8 @@ export function createApp(): Server {
       }
     });
   });
+  // Small responses must leave immediately: with Nagle on, a small request body
+  // followed by a small response can stall ~40 ms on loopback (delayed ACK).
+  server.on('connection', (socket) => socket.setNoDelay(true));
+  return server;
 }
