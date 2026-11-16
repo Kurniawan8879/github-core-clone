@@ -410,7 +410,16 @@ export interface Repo {
   advV0Upload: Buffer | null;
   advV0Receive: Buffer | null;
   advV2: Buffer | null;
+  /** Full fetch responses (v0 and v2), keyed by a canonical request fingerprint.
+   *  A response depends only on the request and the repo's objects/refs, so the
+   *  whole map is dropped by invalidateAdverts on any ref or object change.
+   *  Bounded: at most FETCH_CACHE_MAX entries, oldest evicted first. */
+  fetchCache: Map<string, Buffer>;
+  /** ls-refs responses, keyed by the joined ref-prefix list. Same invalidation. */
+  lsRefsCache: Map<string, Buffer>;
 }
+
+export const FETCH_CACHE_MAX = 16;
 
 /** A line diff: added/deleted line counts between two texts. */
 export function lineDiff(oldText: string, newText: string): { additions: number; deletions: number } {
@@ -499,6 +508,8 @@ export class Store {
       advV0Upload: null,
       advV0Receive: null,
       advV2: null,
+      fetchCache: new Map(),
+      lsRefsCache: new Map(),
     };
     this.repos.set(name, repo);
     return repo;
@@ -512,11 +523,15 @@ export class Store {
     return this.repos.delete(name);
   }
 
-  /** Any ref change invalidates the cached advertisements for that repo. */
+  /** Any ref or object change invalidates the cached advertisements and the
+   *  fetch / ls-refs response caches for that repo. Every mutation path
+   *  (push, contents PUT/DELETE, ref creation, merge) calls this. */
   invalidateAdverts(repo: Repo): void {
     repo.advV0Upload = null;
     repo.advV0Receive = null;
     repo.advV2 = null;
+    repo.fetchCache.clear();
+    repo.lsRefsCache.clear();
   }
 
   /** The commit a ref points at, or null when the ref does not exist. */

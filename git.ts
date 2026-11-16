@@ -11,6 +11,7 @@
 // is a 400, never a crash.
 
 import {
+  FETCH_CACHE_MAX,
   ZERO_OID,
   VIEWER_LOGIN,
   collectObjects,
@@ -324,8 +325,42 @@ function wantedRefs(repo: Repo, wants: string[]): { oid: string; ref: string }[]
   return out;
 }
 
-/** The v2 fetch response: acknowledgments, shallow-info, wanted-refs, packfile. */
+/** The v2 fetch response: acknowledgments, shallow-info, wanted-refs, packfile.
+ *  The whole response is cached per (repo, request fingerprint): a fetch's bytes
+ *  depend only on the request and the repo's objects/refs, and invalidateAdverts
+ *  drops the cache on any mutation, so a cached response is always current. */
+function fetchCacheKey(version: 'v0' | 'v2', req: FetchRequest): string {
+  const sorted = (xs: string[]): string => [...xs].sort().join(',');
+  return [
+    version,
+    sorted(req.wants),
+    sorted(req.haves),
+    sorted(req.shallows),
+    req.depth ?? '',
+    req.deepenSince ?? '',
+    sorted(req.deepenNot),
+  ].join('|');
+}
+
+/** Store a fetch response, evicting the oldest entry past the bound. */
+function fetchCachePut(repo: Repo, key: string, body: Buffer): void {
+  if (repo.fetchCache.size >= FETCH_CACHE_MAX) {
+    const oldest = repo.fetchCache.keys().next().value;
+    if (oldest !== undefined) repo.fetchCache.delete(oldest);
+  }
+  repo.fetchCache.set(key, body);
+}
+
 function v2FetchResponse(repo: Repo, req: FetchRequest): Buffer {
+  const key = fetchCacheKey('v2', req);
+  const cached = repo.fetchCache.get(key);
+  if (cached !== undefined) return cached;
+  const built = v2FetchResponseUncached(repo, req);
+  fetchCachePut(repo, key, built);
+  return built;
+}
+
+function v2FetchResponseUncached(repo: Repo, req: FetchRequest): Buffer {
   const { walked, sendCommits } = walkWants(repo, req);
   const objects = fetchObjects(repo, req, sendCommits);
   const parts: Buffer[] = [];
@@ -367,6 +402,15 @@ function v2FetchResponse(repo: Repo, req: FetchRequest): Buffer {
 
 /** The v0 fetch response: bare NAK/ACK/shallow lines, then a sideband pack. */
 function v0FetchResponse(repo: Repo, req: FetchRequest): Buffer {
+  const key = fetchCacheKey('v0', req);
+  const cached = repo.fetchCache.get(key);
+  if (cached !== undefined) return cached;
+  const built = v0FetchResponseUncached(repo, req);
+  fetchCachePut(repo, key, built);
+  return built;
+}
+
+function v0FetchResponseUncached(repo: Repo, req: FetchRequest): Buffer {
   const { walked, sendCommits } = walkWants(repo, req);
   const objects = fetchObjects(repo, req, sendCommits);
   const parts: Buffer[] = [];
@@ -438,6 +482,15 @@ function parseV0FetchBody(body: Buffer): FetchRequest {
 // ---------------------------------------------------------------- ls-refs
 
 function lsRefsResponse(repo: Repo, prefixes: string[]): Buffer {
+  const key = prefixes.join('\n');
+  const cached = repo.lsRefsCache.get(key);
+  if (cached !== undefined) return cached;
+  const built = lsRefsResponseUncached(repo, prefixes);
+  repo.lsRefsCache.set(key, built);
+  return built;
+}
+
+function lsRefsResponseUncached(repo: Repo, prefixes: string[]): Buffer {
   const parts: Buffer[] = [];
   const head = headLine(repo);
   const refs = sortedRefs(repo);
