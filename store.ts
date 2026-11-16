@@ -539,6 +539,85 @@ export class Store {
     return flattenTree(repo.objects, parseCommit(obj.data).tree);
   }
 
+  /** Create an issue in a repo (the next number, an open state, a fresh id). */
+  createIssue(repo: Repo, title: string, body: string): Issue {
+    repo.issueSeq += 1;
+    const issue: Issue = {
+      id: this.nextSeq(),
+      number: repo.issueSeq,
+      title,
+      body,
+      state: 'open',
+      labels: [],
+      createdSeq: this.nextSeq(),
+      jsonCache: null,
+    };
+    repo.issues.set(issue.number, issue);
+    return issue;
+  }
+
+  /** Create a pull request between two existing branches, or null when a branch
+   *  is missing or an open PR already covers the same head and base. */
+  createPull(repo: Repo, title: string, body: string, headRef: string, baseRef: string): Pull | null {
+    const headTip = repo.refs.get(`refs/heads/${headRef}`);
+    const baseTip = repo.refs.get(`refs/heads/${baseRef}`);
+    if (headTip === undefined || baseTip === undefined) return null;
+    for (const p of repo.pulls.values()) {
+      if (p.state === 'open' && p.headRef === headRef && p.baseRef === baseRef) return null;
+    }
+    const baseObj = repo.objects.get(baseTip);
+    const headObj = repo.objects.get(headTip);
+    const baseTree = baseObj !== undefined && baseObj.type === 'commit' ? parseCommit(baseObj.data).tree : '';
+    const headTree = headObj !== undefined && headObj.type === 'commit' ? parseCommit(headObj.data).tree : '';
+    repo.pullSeq += 1;
+    const pull: Pull = {
+      id: this.nextSeq(),
+      number: repo.pullSeq,
+      title,
+      body,
+      state: 'open',
+      headRef,
+      baseRef,
+      headSha: headTip,
+      baseSha: baseTip,
+      merged: false,
+      mergedAt: null,
+      mergeCommitSha: null,
+      files: diffTrees(repo.objects, baseTree, headTree),
+      createdSeq: this.nextSeq(),
+      jsonCache: null,
+    };
+    repo.pulls.set(pull.number, pull);
+    return pull;
+  }
+
+  /** Squash-merge an open, unconflicted PR onto its base branch: false otherwise. */
+  mergePull(repo: Repo, pull: Pull): boolean {
+    if (pull.state !== 'open' || pull.merged) return false;
+    if (this.pullConflicted(repo, pull)) return false;
+    const headTip = repo.refs.get(`refs/heads/${pull.headRef}`);
+    const baseTip = repo.refs.get(`refs/heads/${pull.baseRef}`);
+    if (headTip === undefined || baseTip === undefined) return false;
+    const headObj = repo.objects.get(headTip);
+    const headTree = headObj !== undefined && headObj.type === 'commit' ? parseCommit(headObj.data).tree : '';
+    const commit = buildCommit({
+      tree: headTree,
+      parents: [baseTip],
+      message: `Merge pull request #${pull.number} from ${pull.headRef}`,
+      timestamp: FIXED_EPOCH_SEC,
+    });
+    const sha = sha1Hex('commit', commit);
+    repo.objects.set(sha, { type: 'commit', data: commit });
+    repo.refs.set(`refs/heads/${pull.baseRef}`, sha);
+    pull.state = 'closed';
+    pull.merged = true;
+    pull.mergedAt = null;
+    pull.mergeCommitSha = sha;
+    pull.jsonCache = null;
+    this.invalidateAdverts(repo);
+    return true;
+  }
+
   /** True when the PR is conflicted: a path it changes differs between its recorded
    *  base and the current tip of its base branch. */
   pullConflicted(repo: Repo, pull: Pull): boolean {

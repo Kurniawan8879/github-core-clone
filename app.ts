@@ -9,6 +9,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { handleGit } from './git.ts';
 import { executeRequest } from './graphql.ts';
+import { handleMcp } from './mcp.ts';
 import {
   DEFAULT_BRANCH,
   FIXED_EPOCH_SEC,
@@ -1040,6 +1041,10 @@ export function createApp(): Server {
           return;
         }
         if (jsonBad) {
+          if (path === '/mcp') {
+            sendJson(ctx, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+            return;
+          }
           err(ctx, 400, 'Problems parsing JSON');
           return;
         }
@@ -1068,6 +1073,17 @@ export function createApp(): Server {
           }
           return;
         }
+        if (path === '/mcp' && method === 'POST') {
+          if (!needAuth(ctx)) return;
+          const answer = handleMcp(store, ctx.bodyParsed);
+          if (answer.value === null) {
+            res.writeHead(answer.status, { 'x-github-request-id': `req-${seq}` });
+            res.end();
+            return;
+          }
+          sendJson(ctx, answer.status, answer.value);
+          return;
+        }
         // Git smart HTTP: /{owner}/{repo}.git/...
         const gitSegs = ctx.segments;
         if (gitSegs.length >= 2 && gitSegs[1].endsWith('.git')) {
@@ -1092,7 +1108,7 @@ export function createApp(): Server {
             return;
           }
         }
-        // MCP lands here in the next increment.
+        // Any other path is an unknown route: JSON 404.
         err(ctx, 404, 'Not Found');
       } catch (e) {
         try {

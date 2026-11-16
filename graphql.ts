@@ -9,13 +9,8 @@
 // arrays. Unknown fields are GraphQL errors (HTTP 200), never HTTP errors.
 
 import {
-  FIXED_EPOCH_SEC,
   VIEWER_ID,
   VIEWER_LOGIN,
-  buildCommit,
-  diffTrees,
-  parseCommit,
-  sha1Hex,
   type Issue,
   type Pull,
   type Repo,
@@ -587,82 +582,6 @@ function mergeableOf(ctx: ExecCtx, repo: Repo, pull: Pull): string {
   return ctx.store.pullConflicted(repo, pull) ? 'CONFLICTING' : 'MERGEABLE';
 }
 
-/** Create an issue the way REST does, shared by the mutation. */
-function createIssueOp(ctx: ExecCtx, repo: Repo, title: string, body: string): Issue {
-  repo.issueSeq += 1;
-  const issue: Issue = {
-    id: ctx.store.nextSeq(),
-    number: repo.issueSeq,
-    title,
-    body,
-    state: 'open',
-    labels: [],
-    createdSeq: ctx.store.nextSeq(),
-    jsonCache: null,
-  };
-  repo.issues.set(issue.number, issue);
-  return issue;
-}
-
-function createPullOp(ctx: ExecCtx, repo: Repo, title: string, headRef: string, baseRef: string): Pull | null {
-  const headTip = repo.refs.get(`refs/heads/${headRef}`);
-  const baseTip = repo.refs.get(`refs/heads/${baseRef}`);
-  if (headTip === undefined || baseTip === undefined) return null;
-  for (const p of repo.pulls.values()) {
-    if (p.state === 'open' && p.headRef === headRef && p.baseRef === baseRef) return null;
-  }
-  const baseObj = repo.objects.get(baseTip);
-  const headObj = repo.objects.get(headTip);
-  const baseTree = baseObj !== undefined && baseObj.type === 'commit' ? parseCommit(baseObj.data).tree : '';
-  const headTree = headObj !== undefined && headObj.type === 'commit' ? parseCommit(headObj.data).tree : '';
-  repo.pullSeq += 1;
-  const pull: Pull = {
-    id: ctx.store.nextSeq(),
-    number: repo.pullSeq,
-    title,
-    body: '',
-    state: 'open',
-    headRef,
-    baseRef,
-    headSha: headTip,
-    baseSha: baseTip,
-    merged: false,
-    mergedAt: null,
-    mergeCommitSha: null,
-    files: diffTrees(repo.objects, baseTree, headTree),
-    createdSeq: ctx.store.nextSeq(),
-    jsonCache: null,
-  };
-  repo.pulls.set(pull.number, pull);
-  return pull;
-}
-
-function mergePullOp(ctx: ExecCtx, repo: Repo, pull: Pull): boolean {
-  if (pull.state !== 'open' || pull.merged) return false;
-  if (ctx.store.pullConflicted(repo, pull)) return false;
-  const headTip = repo.refs.get(`refs/heads/${pull.headRef}`);
-  const baseTip = repo.refs.get(`refs/heads/${pull.baseRef}`);
-  if (headTip === undefined || baseTip === undefined) return false;
-  const headObj = repo.objects.get(headTip);
-  const headTree = headObj !== undefined && headObj.type === 'commit' ? parseCommit(headObj.data).tree : '';
-  const commit = buildCommit({
-    tree: headTree,
-    parents: [baseTip],
-    message: `Merge pull request #${pull.number} from ${pull.headRef}`,
-    timestamp: FIXED_EPOCH_SEC,
-  });
-  const sha = sha1Hex('commit', commit);
-  repo.objects.set(sha, { type: 'commit', data: commit });
-  repo.refs.set(`refs/heads/${pull.baseRef}`, sha);
-  pull.state = 'closed';
-  pull.merged = true;
-  pull.mergedAt = null;
-  pull.mergeCommitSha = sha;
-  pull.jsonCache = null;
-  ctx.store.invalidateAdverts(repo);
-  return true;
-}
-
 /**
  * Read one field of a raw value. Returns null for a missing nullable field.
  * Mutations run here (they are fields of the Mutation type).
@@ -754,7 +673,7 @@ function readField(ctx: ExecCtx, parentType: string, raw: Raw | null, name: stri
         ctx.errors.push({ message: 'createIssue: unknown repositoryId' });
         return null;
       }
-      const issue = createIssueOp(ctx, repo, String(input.title ?? ''), String(input.body ?? ''));
+      const issue = ctx.store.createIssue(repo, String(input.title ?? ''), String(input.body ?? ''));
       return { __typename: 'CreateIssuePayload', issue: issueRaw(repo, issue) };
     }
     if (name === 'closeIssue') {
@@ -779,7 +698,7 @@ function readField(ctx: ExecCtx, parentType: string, raw: Raw | null, name: stri
         ctx.errors.push({ message: 'createPullRequest: unknown repositoryId' });
         return null;
       }
-      const pull = createPullOp(ctx, repo, String(input.title ?? ''), String(input.headRefName ?? ''), String(input.baseRefName ?? ''));
+      const pull = ctx.store.createPull(repo, String(input.title ?? ''), '', String(input.headRefName ?? ''), String(input.baseRefName ?? ''));
       if (pull === null) {
         ctx.errors.push({ message: 'createPullRequest: head or base branch does not exist, or a pull request already exists' });
         return null;
@@ -798,7 +717,7 @@ function readField(ctx: ExecCtx, parentType: string, raw: Raw | null, name: stri
         ctx.errors.push({ message: 'mergePullRequest: unknown pullRequestId' });
         return null;
       }
-      if (!mergePullOp(ctx, repo, pull)) {
+      if (!ctx.store.mergePull(repo, pull)) {
         ctx.errors.push({ message: 'mergePullRequest: pull request is not mergeable' });
         return null;
       }
