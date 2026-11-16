@@ -8,6 +8,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { handleGit } from './git.ts';
+import { executeRequest } from './graphql.ts';
 import {
   DEFAULT_BRANCH,
   FIXED_EPOCH_SEC,
@@ -48,6 +49,7 @@ export interface Ctx {
   segments: string[];
   body: Buffer;
   json: Record<string, unknown> | null;
+  bodyParsed: unknown;
   jsonBad: boolean;
 }
 
@@ -999,15 +1001,19 @@ export function createApp(): Server {
         // Keep an empty query.
       }
       let json: Record<string, unknown> | null = null;
+      let bodyParsed: unknown = null;
       let jsonBad = false;
       // Only the JSON surfaces get a JSON parse: git smart HTTP posts binary packs.
       const isJsonPath = path.startsWith('/api/') || path === '/mcp';
       const needsJson = isJsonPath && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE');
       if (needsJson && body.length > 0) {
         try {
-          const parsed: unknown = JSON.parse(body.toString('utf8'));
-          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) json = parsed as Record<string, unknown>;
-          else json = {};
+          bodyParsed = JSON.parse(body.toString('utf8'));
+          if (typeof bodyParsed === 'object' && bodyParsed !== null && !Array.isArray(bodyParsed)) {
+            json = bodyParsed as Record<string, unknown>;
+          } else {
+            json = {};
+          }
         } catch {
           jsonBad = true;
         }
@@ -1023,6 +1029,7 @@ export function createApp(): Server {
         segments: path.split('/').filter((x) => x !== ''),
         body,
         json: jsonBad ? null : json,
+        bodyParsed,
         jsonBad,
       };
       (ctx as unknown as { seq: number }).seq = seq;
@@ -1039,6 +1046,26 @@ export function createApp(): Server {
         if (path === '/api/v3' || path.startsWith('/api/v3/')) {
           const sub = path === '/api/v3' ? [] : path.slice('/api/v3/'.length).split('/').filter((x) => x !== '');
           handleRest({ ...ctx, segments: sub }, store);
+          return;
+        }
+        if (path === '/api/graphql' && method === 'POST') {
+          if (!needAuth(ctx)) return;
+          const envelope = (result: { data: Record<string, unknown> | null; errors: { message: string }[] }): Record<string, unknown> =>
+            result.errors.length > 0 ? { data: result.data, errors: result.errors } : { data: result.data };
+          if (Array.isArray(ctx.bodyParsed)) {
+            const results = ctx.bodyParsed.map((entry) =>
+              entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+                ? envelope(executeRequest(store, entry as { query?: unknown; variables?: unknown; operationName?: unknown }))
+                : { data: null, errors: [{ message: 'Must provide query string.' }] },
+            );
+            sendJson(ctx, 200, results);
+          } else {
+            const single =
+              ctx.bodyParsed !== null && typeof ctx.bodyParsed === 'object' && !Array.isArray(ctx.bodyParsed)
+                ? (ctx.bodyParsed as { query?: unknown; variables?: unknown; operationName?: unknown })
+                : {};
+            sendJson(ctx, 200, envelope(executeRequest(store, single)));
+          }
           return;
         }
         // Git smart HTTP: /{owner}/{repo}.git/...
@@ -1065,7 +1092,7 @@ export function createApp(): Server {
             return;
           }
         }
-        // GraphQL and MCP land here in the next increment.
+        // MCP lands here in the next increment.
         err(ctx, 404, 'Not Found');
       } catch (e) {
         try {
