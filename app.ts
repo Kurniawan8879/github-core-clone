@@ -7,6 +7,7 @@
 // in the same order produce the same headers.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { handleGit } from './git.ts';
 import {
   DEFAULT_BRANCH,
   FIXED_EPOCH_SEC,
@@ -1001,7 +1002,7 @@ export function createApp(): Server {
       let jsonBad = false;
       // Only the JSON surfaces get a JSON parse: git smart HTTP posts binary packs.
       const isJsonPath = path.startsWith('/api/') || path === '/mcp';
-      const needsJson = isJsonPath && (method === 'POST' || method === 'PUT' || method === 'PATCH');
+      const needsJson = isJsonPath && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE');
       if (needsJson && body.length > 0) {
         try {
           const parsed: unknown = JSON.parse(body.toString('utf8'));
@@ -1040,7 +1041,31 @@ export function createApp(): Server {
           handleRest({ ...ctx, segments: sub }, store);
           return;
         }
-        // Git smart HTTP, GraphQL and MCP land here in the next increments.
+        // Git smart HTTP: /{owner}/{repo}.git/...
+        const gitSegs = ctx.segments;
+        if (gitSegs.length >= 2 && gitSegs[1].endsWith('.git')) {
+          if (!needAuth(ctx)) return;
+          const result = handleGit(
+            store,
+            decode(gitSegs[0]),
+            decode(gitSegs[1].slice(0, -4)),
+            method,
+            gitSegs.slice(2),
+            query,
+            req.headers as Record<string, string | string[] | undefined>,
+            body,
+          );
+          if (result !== null) {
+            res.writeHead(result.status, {
+              'content-type': result.contentType,
+              'x-github-request-id': `req-${seq}`,
+              'content-length': String(result.body.length),
+            });
+            res.end(result.body);
+            return;
+          }
+        }
+        // GraphQL and MCP land here in the next increment.
         err(ctx, 404, 'Not Found');
       } catch (e) {
         try {

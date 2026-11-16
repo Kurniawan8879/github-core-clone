@@ -288,11 +288,10 @@ export interface PackObject extends GitObject {
 }
 
 /**
- * Parse a pack v2. The compressed length of each entry is found by binary search:
- * inflateSync throws on a truncated stream and silently ignores trailing bytes, so
- * the shortest prefix that inflates is the entry's true end. Throws on a bad magic,
- * a bad version, a bad trailer checksum, or a delta entry (this forge never sends
- * deltas and the suite's client never writes them).
+ * Parse a pack v2. Each entry's zlib stream length comes from inflateSync's
+ * `{ info: true }` engine.bytesWritten — one inflate per entry, no guessing.
+ * Throws on a bad magic, a bad version, a bad trailer checksum, or a delta
+ * entry (this forge never sends deltas and the suite's client never writes them).
  */
 export function readPack(buf: Buffer): PackObject[] {
   if (buf.length < 32) throw new Error('pack too short');
@@ -322,28 +321,19 @@ export function readPack(buf: Buffer): PackObject[] {
     const type = NUM_TYPE[typeNum];
     if (type === undefined) throw new Error(`unsupported pack object type ${typeNum}`);
     if (typeNum === 6 || typeNum === 7) throw new Error('delta objects are not accepted here');
-    // Smallest prefix that inflates is the entry's compressed length.
-    let lo = 1;
-    let hi = end - off;
-    let found = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      try {
-        const data = inflateSync(buf.subarray(off, off + mid));
-        if (data.length === size) {
-          found = mid;
-          hi = mid - 1;
-        } else {
-          // Inflated fine but the size is wrong: this is not a whole entry.
-          lo = mid + 1;
-        }
-      } catch {
-        lo = mid + 1;
-      }
+    let inflated: { buffer: Buffer; engine: { bytesWritten: number } };
+    try {
+      inflated = inflateSync(buf.subarray(off, end), { info: true }) as unknown as {
+        buffer: Buffer;
+        engine: { bytesWritten: number };
+      };
+    } catch {
+      throw new Error('pack entry does not inflate');
     }
-    if (found === -1) throw new Error('pack entry does not inflate');
-    const data = inflateSync(buf.subarray(off, off + found));
-    off += found;
+    const data: Buffer = inflated.buffer;
+    const consumed = inflated.engine.bytesWritten;
+    if (consumed <= 0 || data.length !== size) throw new Error('pack entry size mismatch');
+    off += consumed;
     out.push({ type, data, oid: sha1Hex(type, data) });
   }
   return out;
