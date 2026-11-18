@@ -38,6 +38,8 @@ import {
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 const SHOP_TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
+/** Shared empty query: handlers only read it, so one instance serves every request. */
+const EMPTY_QUERY = new URLSearchParams();
 
 let requestSeq = 0;
 
@@ -83,10 +85,10 @@ function err(ctx: Ctx, status: number, message: string): void {
 /** The bearer token this process expects, or '' when any non-empty bearer will do. */
 function authorized(ctx: Ctx): boolean {
   const header = ctx.req.headers.authorization ?? '';
-  const m = /^Bearer (.+)$/.exec(header);
-  if (m === null) return false;
-  if (SHOP_TOKEN !== '') return m[1] === SHOP_TOKEN;
-  return m[1] !== '';
+  if (!header.startsWith('Bearer ')) return false;
+  const token = header.slice(7);
+  if (SHOP_TOKEN !== '') return token === SHOP_TOKEN;
+  return token !== '';
 }
 
 function needAuth(ctx: Ctx): boolean {
@@ -136,8 +138,11 @@ function repoObject(repo: Repo): Record<string, unknown> {
   };
 }
 
-function repoJson(repo: Repo): string {
-  if (repo.jsonCache === null) repo.jsonCache = JSON.stringify(repoObject(repo));
+function repoJson(repo: Repo): Buffer {
+  if (repo.jsonCache === null) {
+    repo.jsonCache = Buffer.from(JSON.stringify(repoObject(repo)), 'utf8');
+    repo.jsonCacheLen = repo.jsonCache.length;
+  }
   return repo.jsonCache;
 }
 
@@ -163,8 +168,11 @@ function issueObject(repo: Repo, issue: Issue): Record<string, unknown> {
   };
 }
 
-function issueJson(repo: Repo, issue: Issue): string {
-  if (issue.jsonCache === null) issue.jsonCache = JSON.stringify(issueObject(repo, issue));
+function issueJson(repo: Repo, issue: Issue): Buffer {
+  if (issue.jsonCache === null) {
+    issue.jsonCache = Buffer.from(JSON.stringify(issueObject(repo, issue)), 'utf8');
+    issue.jsonCacheLen = issue.jsonCache.length;
+  }
   return issue.jsonCache;
 }
 
@@ -246,6 +254,8 @@ function openRepo(ctx: Ctx, store: Store, owner: string, name: string): Repo | n
 }
 
 function decode(seg: string): string {
+  // No '%' means decodeURIComponent is the identity (and cannot throw).
+  if (!seg.includes('%')) return seg;
   try {
     return decodeURIComponent(seg);
   } catch {
@@ -357,7 +367,7 @@ function handleRepo(ctx: Ctx, store: Store, s: string[]): void {
       ctx.res.writeHead(200, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(body)),
+        'content-length': String(repo.jsonCacheLen),
       });
       ctx.res.end(body);
       return;
@@ -370,6 +380,7 @@ function handleRepo(ctx: Ctx, store: Store, s: string[]): void {
       const desc = ctx.json.description;
       if (typeof desc === 'string') repo.description = desc;
       repo.jsonCache = null;
+      repo.jsonCacheLen = 0;
       sendJson(ctx, 200, repoObject(repo));
       return;
     }
@@ -716,13 +727,14 @@ function handleIssues(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void 
         labels,
         createdSeq: store.nextSeq(),
         jsonCache: null,
+        jsonCacheLen: 0,
       };
       repo.issues.set(issue.number, issue);
       const body = issueJson(repo, issue);
       ctx.res.writeHead(201, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(body)),
+        'content-length': String(issue.jsonCacheLen),
       });
       ctx.res.end(body);
       return;
@@ -755,7 +767,7 @@ function handleIssues(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void 
       ctx.res.writeHead(200, {
         'content-type': JSON_TYPE,
         'x-github-request-id': `req-${ctxSeq(ctx)}`,
-        'content-length': String(Buffer.byteLength(body)),
+        'content-length': String(issue.jsonCacheLen),
       });
       ctx.res.end(body);
       return;
@@ -772,6 +784,7 @@ function handleIssues(ctx: Ctx, store: Store, repo: Repo, rest: string[]): void 
       const state = ctx.json.state;
       if (state === 'open' || state === 'closed') issue.state = state;
       issue.jsonCache = null;
+      issue.jsonCacheLen = 0;
       sendJson(ctx, 200, issueObject(repo, issue));
       return;
     }
@@ -990,15 +1003,33 @@ export function createApp(): Server {
       // Small bodies arrive as a single chunk (or none): skip the Buffer.concat copy.
       const body = chunks.length === 0 ? EMPTY_BODY : chunks.length === 1 ? (chunks[0] as Buffer) : Buffer.concat(chunks);
       const method = req.method ?? 'GET';
-      // One URL parse gives both the path and the query (was two parses per request).
+      // Fast path: the suite sends origin-form paths, so split on '?' by hand and
+      // build the query only when one is present. new URL stays the fallback for
+      // anything odd (absolute-form, dot segments, fragments, unparsable input).
+      const rawUrl = req.url ?? '/';
       let path = '/';
-      let query = new URLSearchParams();
-      try {
-        const url = new URL(req.url ?? '/', 'http://entry');
-        path = url.pathname;
-        query = url.searchParams;
-      } catch {
-        // Keep the defaults: an unparsable URL is the root with no query.
+      let query: URLSearchParams = EMPTY_QUERY;
+      const qi = rawUrl.indexOf('?');
+      const rawPath = qi === -1 ? rawUrl : rawUrl.slice(0, qi);
+      if (
+        rawUrl.startsWith('http://') ||
+        rawUrl.startsWith('https://') ||
+        rawUrl.includes('#') ||
+        rawPath.includes('/./') ||
+        rawPath.includes('/../') ||
+        rawPath.endsWith('/.') ||
+        rawPath.endsWith('/..')
+      ) {
+        try {
+          const url = new URL(rawUrl, 'http://entry');
+          path = url.pathname;
+          query = url.searchParams;
+        } catch {
+          // Keep the defaults: an unparsable URL is the root with no query.
+        }
+      } else {
+        path = rawPath;
+        if (qi !== -1) query = new URLSearchParams(rawUrl.slice(qi + 1));
       }
       if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
       let json: Record<string, unknown> | null = null;
@@ -1027,7 +1058,7 @@ export function createApp(): Server {
         method,
         path,
         query,
-        segments: path.split('/').filter((x) => x !== ''),
+        segments: [], // filled only where a route needs them (REST sets its own, git splits below)
         body,
         json: jsonBad ? null : json,
         bodyParsed,
@@ -1050,7 +1081,8 @@ export function createApp(): Server {
         }
         if (path === '/api/v3' || path.startsWith('/api/v3/')) {
           const sub = path === '/api/v3' ? [] : path.slice('/api/v3/'.length).split('/').filter((x) => x !== '');
-          handleRest({ ...ctx, segments: sub }, store);
+          ctx.segments = sub; // mutate, don't spread: ctx is fresh per request
+          handleRest(ctx, store);
           return;
         }
         if (path === '/api/graphql' && method === 'POST') {
@@ -1085,7 +1117,7 @@ export function createApp(): Server {
           return;
         }
         // Git smart HTTP: /{owner}/{repo}.git/...
-        const gitSegs = ctx.segments;
+        const gitSegs = path.split('/').filter((x) => x !== '');
         if (gitSegs.length >= 2 && gitSegs[1].endsWith('.git')) {
           if (!needAuth(ctx)) return;
           const result = handleGit(

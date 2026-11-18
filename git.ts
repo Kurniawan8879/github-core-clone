@@ -40,15 +40,29 @@ const DELIM = Buffer.from('0001', 'ascii');
 export function pktLine(payload: string | Buffer): Buffer {
   const data = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload;
   const len = data.length + 4;
-  return Buffer.concat([Buffer.from(len.toString(16).padStart(4, '0'), 'ascii'), data]);
+  // One allocation: the length prefix and the payload share a single buffer.
+  const out = Buffer.allocUnsafe(len);
+  out.write(len.toString(16).padStart(4, '0'), 0, 4, 'ascii');
+  data.copy(out, 4);
+  return out;
+}
+
+function hexVal(b: number): number {
+  if (b >= 48 && b <= 57) return b - 48; // 0-9
+  if (b >= 97 && b <= 102) return b - 87; // a-f
+  if (b >= 65 && b <= 70) return b - 55; // A-F
+  return -1;
 }
 
 /** Read one pkt-line at `off`; null when the bytes run out first. */
 export function readPktLine(buf: Buffer, off: number): { pkt: Pkt; next: number } | null {
   if (off + 4 > buf.length) return null;
-  const hex = buf.subarray(off, off + 4).toString('ascii');
-  if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error('bad pkt-line length');
-  const len = parseInt(hex, 16);
+  const h0 = hexVal(buf[off]);
+  const h1 = hexVal(buf[off + 1]);
+  const h2 = hexVal(buf[off + 2]);
+  const h3 = hexVal(buf[off + 3]);
+  if (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0) throw new Error('bad pkt-line length');
+  const len = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3;
   if (len === 0) return { pkt: { kind: 'flush', data: Buffer.alloc(0) }, next: off + 4 };
   if (len === 1) return { pkt: { kind: 'delim', data: Buffer.alloc(0) }, next: off + 4 };
   if (len === 2) return { pkt: { kind: 'end', data: Buffer.alloc(0) }, next: off + 4 };
@@ -56,7 +70,8 @@ export function readPktLine(buf: Buffer, off: number): { pkt: Pkt; next: number 
   return { pkt: { kind: 'data', data: buf.subarray(off + 4, off + len) }, next: off + len };
 }
 
-/** All data-packet payloads as strings, stopping at the first flush. */
+/** All data-packet payloads as strings, stopping at the first flush. The one trailing
+ *  newline is stripped here, once, instead of a regex per line in every caller. */
 export function pktLinesUntilFlush(buf: Buffer): { lines: string[]; next: number } {
   const lines: string[] = [];
   let off = 0;
@@ -64,7 +79,11 @@ export function pktLinesUntilFlush(buf: Buffer): { lines: string[]; next: number
     const read = readPktLine(buf, off);
     if (read === null) throw new Error('pkt-line stream ended before flush');
     if (read.pkt.kind === 'flush') return { lines, next: read.next };
-    if (read.pkt.kind === 'data') lines.push(read.pkt.data.toString('utf8'));
+    if (read.pkt.kind === 'data') {
+      let line = read.pkt.data.toString('utf8');
+      if (line.endsWith('\n')) line = line.slice(0, -1);
+      lines.push(line);
+    }
     off = read.next;
   }
 }
@@ -74,7 +93,10 @@ export function sidebandPackets(data: Buffer): Buffer[] {
   const out: Buffer[] = [];
   for (let off = 0; off < data.length; off += 65515) {
     const chunk = data.subarray(off, Math.min(data.length, off + 65515));
-    out.push(pktLine(Buffer.concat([Buffer.from([1]), chunk])));
+    const framed = Buffer.allocUnsafe(chunk.length + 1);
+    framed[0] = 1;
+    chunk.copy(framed, 1);
+    out.push(pktLine(framed));
   }
   return out;
 }
@@ -434,7 +456,7 @@ function parseV2FetchBody(body: Buffer): FetchRequest {
   const req: FetchRequest = { wants: [], haves: [], shallows: [], deepenNot: [] };
   let seenDelim = false;
   for (const raw of lines) {
-    const line = raw.replace(/\n$/, '');
+    const line = raw;
     if (line === '') continue;
     if (line === 'command=fetch') continue;
     if (line.startsWith('agent=') || line.startsWith('object-format=')) continue;
@@ -459,7 +481,7 @@ function parseV0FetchBody(body: Buffer): FetchRequest {
   // Section 1: wants, shallow, deepen. Section 2: haves, done. Two flushes.
   const first = pktLinesUntilFlush(body);
   for (const raw of first.lines) {
-    const line = raw.replace(/\n$/, '');
+    const line = raw;
     if (line.startsWith('want ')) {
       const rest = line.slice(5).trim();
       req.wants.push(rest.split(' ')[0]);
@@ -472,7 +494,7 @@ function parseV0FetchBody(body: Buffer): FetchRequest {
   if (rest.length > 0) {
     const second = pktLinesUntilFlush(rest);
     for (const raw of second.lines) {
-      const line = raw.replace(/\n$/, '');
+      const line = raw;
       if (line.startsWith('have ')) req.haves.push(line.slice(5).trim());
     }
   }
@@ -513,7 +535,7 @@ function parseLsRefsBody(body: Buffer): string[] {
   const { lines } = pktLinesUntilFlush(body);
   const prefixes: string[] = [];
   for (const raw of lines) {
-    const line = raw.replace(/\n$/, '');
+    const line = raw;
     if (line.startsWith('ref-prefix ')) prefixes.push(line.slice(11).trim());
   }
   return prefixes;
@@ -531,7 +553,7 @@ function parsePushBody(body: Buffer): { commands: PushCommand[]; pack: Buffer | 
   const { lines, next } = pktLinesUntilFlush(body);
   const commands: PushCommand[] = [];
   for (const raw of lines) {
-    const line = raw.replace(/\n$/, '');
+    const line = raw;
     const nul = line.indexOf('\0');
     const head = nul >= 0 ? line.slice(0, nul) : line;
     const parts = head.split(' ');

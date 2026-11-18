@@ -690,6 +690,7 @@ function readField(ctx: ExecCtx, parentType: string, raw: Raw | null, name: stri
       }
       issue.state = 'closed';
       issue.jsonCache = null;
+      issue.jsonCacheLen = 0;
       return { __typename: 'CloseIssuePayload', issue: issueRaw(repo, issue) };
     }
     if (name === 'createPullRequest') {

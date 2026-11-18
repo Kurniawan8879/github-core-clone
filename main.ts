@@ -12,6 +12,7 @@
 //      never a reason to exit early.
 
 import { createApp } from './app.ts';
+import { warmUpForge } from './warmup.ts';
 
 const STANDALONE = process.argv.includes('--standalone');
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
@@ -78,6 +79,10 @@ async function main(): Promise<void> {
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('the server did not bind an ephemeral TCP port');
   process.stdout.write(`[entry] listening on port ${address.port}\n`);
+  // Startup JIT warm-up on a throwaway store (never touches this server's
+  // store): best-effort, bounded, before register so it eats boot budget.
+  // MAKEFUN_WARMUP_OFF=1 disables it (A/B only; the trial never sets it).
+  if (process.env.MAKEFUN_WARMUP_OFF !== '1') await warmUpForge(address.port);
   if (STANDALONE) {
     process.stdout.write('[entry] standalone mode: no env to register with\n');
     return;

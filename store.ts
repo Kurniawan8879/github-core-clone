@@ -349,7 +349,10 @@ export interface Issue {
   state: 'open' | 'closed';
   labels: string[];
   createdSeq: number;
-  jsonCache: string | null;
+  /** The rendered JSON as bytes (null when not built); replies send it without re-encoding. */
+  jsonCache: Buffer | null;
+  /** Byte length of jsonCache (0 when the cache is empty), so replies skip Buffer.byteLength. */
+  jsonCacheLen: number;
 }
 
 export interface Comment {
@@ -406,7 +409,10 @@ export interface Repo {
   comments: Map<number, Comment>;
   commentSeq: number;
   createdSeq: number;
-  jsonCache: string | null;
+  /** The rendered JSON as bytes (null when not built); replies send it without re-encoding. */
+  jsonCache: Buffer | null;
+  /** Byte length of jsonCache (0 when the cache is empty), so replies skip Buffer.byteLength. */
+  jsonCacheLen: number;
   advV0Upload: Buffer | null;
   advV0Receive: Buffer | null;
   advV2: Buffer | null;
@@ -505,6 +511,7 @@ export class Store {
       commentSeq: 0,
       createdSeq: this.nextSeq(),
       jsonCache: null,
+      jsonCacheLen: 0,
       advV0Upload: null,
       advV0Receive: null,
       advV2: null,
@@ -566,6 +573,7 @@ export class Store {
       labels: [],
       createdSeq: this.nextSeq(),
       jsonCache: null,
+      jsonCacheLen: 0,
     };
     repo.issues.set(issue.number, issue);
     return issue;
