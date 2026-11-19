@@ -234,9 +234,9 @@ var v2Adv = v2Advertisement()
 // ---------------------------------------------------------------- fetch
 
 type fetchRequest struct {
-	wants          []string
-	haves          []string
-	haveBlocks     [][]string // flush-separated have groups that are
+	wants      []string
+	haves      []string
+	haveBlocks [][]string // flush-separated have groups that are
 	// negotiation ROUNDS: every have block except the one containing
 	// `done` (haves sent together with `done` are not a round — real
 	// git only does a consume_shallow_list+get_ack exchange per block

@@ -232,9 +232,9 @@ func gqlRenderJSON(v gqlValue) []byte {
 	return b.Bytes()
 }
 
-// jsParseInt mirrors JS parseInt(s, 10): an optional sign, then the leading
+// gqlParseInt mirrors JS parseInt(s, 10): an optional sign, then the leading
 // digit run; no digits at all is NaN.
-func jsParseInt(s string) float64 {
+func gqlParseInt(s string) float64 {
 	i := 0
 	neg := false
 	if i < len(s) && (s[i] == '-' || s[i] == '+') {
@@ -255,10 +255,10 @@ func jsParseInt(s string) float64 {
 	return f
 }
 
-// jsParseIntToInt is jsParseInt narrowed to a Go int for map lookups; false
+// gqlParseIntToInt is gqlParseInt narrowed to a Go int for map lookups; false
 // when there are no leading digits (NaN in JS, which never matches a key).
-func jsParseIntToInt(s string) (int, bool) {
-	f := jsParseInt(s)
+func gqlParseIntToInt(s string) (int, bool) {
+	f := gqlParseInt(s)
 	if math.IsNaN(f) {
 		return 0, false
 	}
@@ -638,7 +638,7 @@ func (p *gqlParser) parseValue() *gqlASTValue {
 		return &gqlASTValue{kind: "string", str: tok.value}
 	}
 	if tok.kind == tokInt {
-		return &gqlASTValue{kind: "int", num: jsParseInt(tok.value)}
+		return &gqlASTValue{kind: "int", num: gqlParseInt(tok.value)}
 	}
 	if tok.kind == tokFloat {
 		return &gqlASTValue{kind: "float", num: jsParseFloat(tok.value)}
@@ -1038,7 +1038,7 @@ func decodeGlobalID(id string) *decodedGlobalID {
 	if len(parts) < 2 {
 		return nil
 	}
-	repoID := jsParseInt(parts[1])
+	repoID := gqlParseInt(parts[1])
 	if math.IsNaN(repoID) || math.IsInf(repoID, 0) || math.Abs(repoID) > 9007199254740991 || repoID != math.Trunc(repoID) {
 		return nil
 	}
@@ -1275,7 +1275,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 				if len(decoded.rest) == 0 {
 					return nil
 				}
-				n, ok := jsParseIntToInt(decoded.rest[0])
+				n, ok := gqlParseIntToInt(decoded.rest[0])
 				if !ok {
 					return nil
 				}
@@ -1288,7 +1288,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 				if len(decoded.rest) == 0 {
 					return nil
 				}
-				n, ok := jsParseIntToInt(decoded.rest[0])
+				n, ok := gqlParseIntToInt(decoded.rest[0])
 				if !ok {
 					return nil
 				}
@@ -1452,7 +1452,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 			repo := findRepoByID(ctx, decoded.repoID)
 			var issue *Issue
 			if repo != nil && len(decoded.rest) > 0 {
-				if n, ok := jsParseIntToInt(decoded.rest[0]); ok {
+				if n, ok := gqlParseIntToInt(decoded.rest[0]); ok {
 					issue = repo.Issues[n]
 				}
 			}
@@ -1494,7 +1494,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 			repo := findRepoByID(ctx, decoded.repoID)
 			var pull *Pull
 			if repo != nil && len(decoded.rest) > 0 {
-				if n, ok := jsParseIntToInt(decoded.rest[0]); ok {
+				if n, ok := gqlParseIntToInt(decoded.rest[0]); ok {
 					pull = repo.Pulls[n]
 				}
 			}
@@ -1523,7 +1523,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 			issueNumber := 0
 			var issue *Issue
 			if repo != nil && len(decoded.rest) > 0 {
-				if n, ok := jsParseIntToInt(decoded.rest[0]); ok {
+				if n, ok := gqlParseIntToInt(decoded.rest[0]); ok {
 					issueNumber = n
 					issue = repo.Issues[n]
 				}
@@ -1533,10 +1533,7 @@ func readField(ctx *gqlCtx, parentType string, raw *gqlRaw, name string, args ma
 				return nil
 			}
 			repo.CommentSeq++
-			comment := &Comment{ID: ctx.store.NextSeq(), Body: optStr("body"), CreatedSeq: ctx.store.NextSeq()}
-			// NOTE: Node also sets comment.issue = issueNumber here; the Go
-			// Comment type (types.go, coordinator-owned) has no Issue field,
-			// so the linkage cannot be stored — flagged to the coordinator.
+			comment := &Comment{ID: ctx.store.NextSeq(), Body: optStr("body"), Issue: issueNumber, CreatedSeq: ctx.store.NextSeq()}
 			repo.Comments[comment.ID] = comment
 			payload := newGqlRaw("AddCommentPayload")
 			edge := newGqlRaw("CommentEdge")

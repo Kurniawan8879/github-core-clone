@@ -817,8 +817,6 @@ func handleRepo(c *restCtx, s []string) {
 	jsonError(c.w, 404, "Not Found")
 }
 
-var sha40Re = regexp.MustCompile(`^[0-9a-f]{40}$`)
-
 // labelList returns labels in creation order (Node's Map insertion order).
 // Any label missing from the order table (never via REST) falls back to a
 // sorted append so the output stays deterministic.
@@ -1197,12 +1195,9 @@ func handleIssues(c *restCtx, repo *Repo, rest []string) {
 	// /issues/{n}/comments
 	if len(rest) == 2 && rest[1] == "comments" {
 		if method == "GET" {
-			auxMu.Lock()
-			issueOf := commentIssue[c.store]
-			auxMu.Unlock()
 			all := make([]*Comment, 0)
 			for _, cm := range repo.Comments {
-				if issueOf != nil && issueOf[cm.ID] == number {
+				if cm.Issue == number {
 					all = append(all, cm)
 				}
 			}
@@ -1230,7 +1225,7 @@ func handleIssues(c *restCtx, repo *Repo, rest []string) {
 				return
 			}
 			repo.CommentSeq++
-			comment := &Comment{ID: c.store.NextSeq(), Body: commentBody, CreatedSeq: c.store.NextSeq()}
+			comment := &Comment{ID: c.store.NextSeq(), Body: commentBody, Issue: number, CreatedSeq: c.store.NextSeq()}
 			repo.Comments[comment.ID] = comment
 			auxMu.Lock()
 			m := commentIssue[c.store]

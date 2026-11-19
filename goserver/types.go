@@ -106,6 +106,7 @@ type Issue struct {
 type Comment struct {
 	ID         int
 	Body       string
+	Issue      int // issue number this comment belongs to (Node sets comment.issue dynamically)
 	CreatedSeq int
 }
 

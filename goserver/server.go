@@ -40,6 +40,12 @@ var reqSeq atomic.Int64
 // throughput (the clone workload is concurrent git, not REST).
 var restMu sync.Mutex
 
+// globalMu serialises the whole request dispatch. Node is single-threaded;
+// Go maps panic on concurrent writes and the suite drives 50 concurrent
+// clones. One mutex around ServeHTTP mirrors Node's semantics; the lock cost
+// is negligible vs request time. (restMu/mcpMu inside are redundant but harmless.)
+var globalMu sync.Mutex
+
 // nextRequestID returns "req-<n>" from the atomic counter.
 func nextRequestID() string {
 	return "req-" + strconv.FormatInt(reqSeq.Add(1), 10)
@@ -382,6 +388,8 @@ func NewHandler(s *Store) http.Handler {
 }
 
 func (h *forgeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	seq := nextRequestID()
 	iw := &idWriter{ResponseWriter: w, id: seq}
 	iw.Header().Set("X-GitHub-Request-Id", seq)
